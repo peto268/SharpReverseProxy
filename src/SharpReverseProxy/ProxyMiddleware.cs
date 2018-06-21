@@ -1,42 +1,45 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
+using System.Net;
 using System.Net.Http;
 using System.Threading.Tasks;
-using Microsoft.AspNetCore.Http;
-using Microsoft.Extensions.Options;
+using System.Web;
 
 namespace SharpReverseProxy {
+    using AppFunc = Func<IDictionary<string, object>, Task>;
     public class ProxyMiddleware {
-        private readonly RequestDelegate _next;
+        private readonly AppFunc _next;
         private readonly HttpClient _httpClient;
         private readonly ProxyOptions _options;
 
-        public ProxyMiddleware(RequestDelegate next, IOptions<ProxyOptions> options) {
+        public ProxyMiddleware(AppFunc next, ProxyOptions options) {
             _next = next;
-            _options = options.Value;
+            _options = options;
             _httpClient = new HttpClient(_options.BackChannelMessageHandler ?? new HttpClientHandler {
                 AllowAutoRedirect = _options.FollowRedirects
             });
         }
 
-        public async Task Invoke(HttpContext context) {
+        public async Task Invoke(IDictionary<string, object> environment) {
+            var context = (HttpContextBase) environment["System.Web.HttpContextBase"];
             var uri = GeRequestUri(context);
             var resultBuilder = new ProxyResultBuilder(uri);
 
             var matchedRule = _options.ProxyRules.FirstOrDefault(r => r.Matcher.Invoke(uri));
             if (matchedRule == null) {
-                await _next(context);
+                await _next(environment);
                 _options.Reporter.Invoke(resultBuilder.NotProxied(context.Response.StatusCode));
                 return;
             }
 
             if (matchedRule.RequiresAuthentication && !UserIsAuthenticated(context)) {
-                context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                context.Response.StatusCode = (int) HttpStatusCode.Unauthorized;
                 _options.Reporter.Invoke(resultBuilder.NotAuthenticated());
                 return;
             }
 
-            var proxyRequest = new HttpRequestMessage(new HttpMethod(context.Request.Method), uri);
+            var proxyRequest = new HttpRequestMessage(new HttpMethod(context.Request.HttpMethod), uri);
             SetProxyRequestBody(proxyRequest, context);
             SetProxyRequestHeaders(proxyRequest, context);
 
@@ -50,21 +53,24 @@ namespace SharpReverseProxy {
                 await ProxyTheRequest(context, proxyRequest, matchedRule);
             }
             catch (HttpRequestException) {
-                context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                context.Response.StatusCode = (int) HttpStatusCode.ServiceUnavailable;
             }
             _options.Reporter.Invoke(resultBuilder.Proxied(proxyRequest.RequestUri, context.Response.StatusCode));
         }
 
-        private async Task ProxyTheRequest(HttpContext context, HttpRequestMessage proxyRequest, ProxyRule proxyRule) {
+        private async Task ProxyTheRequest(HttpContextBase context, HttpRequestMessage proxyRequest, ProxyRule proxyRule) {
             using (var responseMessage = await _httpClient.SendAsync(proxyRequest,
-                                                                     HttpCompletionOption.ResponseHeadersRead,
-                                                                     context.RequestAborted)) {
+                                                                     HttpCompletionOption.ResponseHeadersRead)) {
 
                 if(proxyRule.PreProcessResponse || proxyRule.ResponseModifier == null) { 
                     context.Response.StatusCode = (int)responseMessage.StatusCode;
+                    context.Response.ClearHeaders();
                     context.Response.ContentType = responseMessage.Content?.Headers.ContentType?.MediaType;
                     foreach (var header in responseMessage.Headers) {
-                        context.Response.Headers[header.Key] = header.Value.ToArray();
+                        foreach (var value in header.Value.ToArray())
+                        {
+                            context.Response.AddHeader(header.Key, value);
+                        }
                     }
                     // SendAsync removes chunking from the response. 
                     // This removes the header so it doesn't expect a chunked response.
@@ -72,45 +78,47 @@ namespace SharpReverseProxy {
 
                     if (responseMessage.Content != null) {
                         foreach (var contentHeader in responseMessage.Content.Headers) {
-                            context.Response.Headers[contentHeader.Key] = contentHeader.Value.ToArray();
+                            foreach (var value in contentHeader.Value.ToArray())
+                            {
+                                context.Response.AddHeader(contentHeader.Key, value);
+                            }
                         }
-                        await responseMessage.Content.CopyToAsync(context.Response.Body);
+                        await responseMessage.Content.CopyToAsync(context.Response.OutputStream);
                     }
                 }
                 
                 if (proxyRule.ResponseModifier != null) {
-                    await proxyRule.ResponseModifier.Invoke(responseMessage, context);
+                    await proxyRule.ResponseModifier.Invoke(responseMessage);
                 }
             }
         }
 
-        private static Uri GeRequestUri(HttpContext context) {
-            var request = context.Request;
-            var uriString = $"{request.Scheme}://{request.Host}{request.PathBase}{request.Path}{request.QueryString}";
-            return new Uri(uriString);
+        private static Uri GeRequestUri(HttpContextBase context) {
+            return context.Request.Url;
         }
 
-        private static void SetProxyRequestBody(HttpRequestMessage requestMessage, HttpContext context) {
-            var requestMethod = context.Request.Method;
-            if (HttpMethods.IsGet(requestMethod) ||
-                HttpMethods.IsHead(requestMethod) ||
-                HttpMethods.IsDelete(requestMethod) ||
-                HttpMethods.IsTrace(requestMethod)) {
+        private static void SetProxyRequestBody(HttpRequestMessage requestMessage, HttpContextBase context) {
+            var requestMethod = context.Request.HttpMethod;
+            if (requestMethod == "GET" ||
+                requestMethod == "HEAD" ||
+                requestMethod == "DELETE" ||
+                requestMethod == "TRACE") {
                 return;
             }
-            requestMessage.Content = new StreamContent(context.Request.Body);
+            requestMessage.Content = new StreamContent(context.Request.InputStream);
         }
 
-        private void SetProxyRequestHeaders(HttpRequestMessage requestMessage, HttpContext context) {
-            foreach (var header in context.Request.Headers) {
-                if (!requestMessage.Headers.TryAddWithoutValidation(header.Key, header.Value.ToArray())) {
-                    requestMessage.Content?.Headers.TryAddWithoutValidation(header.Key, header.Value.ToArray());
+        private void SetProxyRequestHeaders(HttpRequestMessage requestMessage, HttpContextBase context) {
+            foreach (string header in context.Request.Headers) {
+                var values = context.Request.Headers.GetValues(header);
+                if (!requestMessage.Headers.TryAddWithoutValidation(header, values)) {
+                    requestMessage.Content?.Headers.TryAddWithoutValidation(header, values);
                 }
             }
         }
 
-        private bool UserIsAuthenticated(HttpContext context) {
-            return context.User.Identities.FirstOrDefault()?.IsAuthenticated ?? false;
+        private bool UserIsAuthenticated(HttpContextBase context) {
+            return context.User.Identity.IsAuthenticated;
         }
     }
 

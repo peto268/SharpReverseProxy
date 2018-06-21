@@ -1,5 +1,5 @@
 using System;
-using Microsoft.AspNetCore.Http;
+using System.Net;
 
 namespace SharpReverseProxy {
     public class ProxyResultBuilder {
@@ -27,7 +27,7 @@ namespace SharpReverseProxy {
 
         public ProxyResult NotAuthenticated() {
             Finish(ProxyStatus.NotAuthenticated);
-            _result.HttpStatusCode = StatusCodes.Status401Unauthorized;
+            _result.HttpStatusCode = (int) HttpStatusCode.Unauthorized;
             return _result;
         }
 
