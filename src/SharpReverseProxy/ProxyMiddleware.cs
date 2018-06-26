@@ -84,10 +84,9 @@ namespace SharpReverseProxy {
             using (var responseMessage = await _httpClient.SendAsync(proxyRequest,
                                                                      HttpCompletionOption.ResponseHeadersRead)) {
 
-                if(proxyRule.PreProcessResponse || proxyRule.ResponseModifier == null) { 
-                    context.Response.StatusCode = (int) responseMessage.StatusCode;
+                if(proxyRule.PreProcessResponse || proxyRule.ResponseModifier == null) {
                     context.Response.ClearHeaders();
-                    context.Response.ContentType = responseMessage.Content?.Headers.ContentType?.MediaType;
+                    context.Response.StatusCode = (int)responseMessage.StatusCode;
                     foreach (var header in responseMessage.Headers) {
                         if (ExcludedResponseHeaders.Contains(header.Key.ToLowerInvariant())) {
                             continue;
