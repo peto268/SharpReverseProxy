@@ -9,6 +9,28 @@ using System.Web;
 namespace SharpReverseProxy {
     using AppFunc = Func<IDictionary<string, object>, Task>;
     public class ProxyMiddleware {
+
+        // Headers not forwarded to the remote endpoint
+        private static readonly HashSet<string> ExcludedRequestHeaders =
+            new HashSet<string> {
+                "connection",
+                "content-length",
+                "keep-alive",
+                "upgrade",
+                "upgrade-insecure-requests"
+            };
+
+        // Headers returned by the remote endpoint
+        // which are not returned to the client
+        private static readonly HashSet<string> ExcludedResponseHeaders =
+            new HashSet<string> {
+                "connection",
+                "server",
+                "transfer-encoding",
+                "upgrade",
+                "x-powered-by"
+            };
+
         private readonly AppFunc _next;
         private readonly HttpClient _httpClient;
         private readonly ProxyOptions _options;
@@ -63,30 +85,31 @@ namespace SharpReverseProxy {
                                                                      HttpCompletionOption.ResponseHeadersRead)) {
 
                 if(proxyRule.PreProcessResponse || proxyRule.ResponseModifier == null) { 
-                    context.Response.StatusCode = (int)responseMessage.StatusCode;
+                    context.Response.StatusCode = (int) responseMessage.StatusCode;
                     context.Response.ClearHeaders();
                     context.Response.ContentType = responseMessage.Content?.Headers.ContentType?.MediaType;
                     foreach (var header in responseMessage.Headers) {
-                        foreach (var value in header.Value.ToArray())
-                        {
+                        if (ExcludedResponseHeaders.Contains(header.Key.ToLowerInvariant())) {
+                            continue;
+                        }
+                        foreach (var value in header.Value.ToArray()) {
                             context.Response.AddHeader(header.Key, value);
                         }
                     }
-                    // SendAsync removes chunking from the response. 
-                    // This removes the header so it doesn't expect a chunked response.
-                    context.Response.Headers.Remove("transfer-encoding");
 
                     if (responseMessage.Content != null) {
                         foreach (var contentHeader in responseMessage.Content.Headers) {
-                            foreach (var value in contentHeader.Value.ToArray())
-                            {
+                            if (ExcludedResponseHeaders.Contains(contentHeader.Key.ToLowerInvariant())) {
+                                continue;
+                            }
+                            foreach (var value in contentHeader.Value.ToArray()) {
                                 context.Response.AddHeader(contentHeader.Key, value);
                             }
                         }
                         await responseMessage.Content.CopyToAsync(context.Response.OutputStream);
                     }
                 }
-                
+
                 if (proxyRule.ResponseModifier != null) {
                     await proxyRule.ResponseModifier.Invoke(responseMessage);
                 }
@@ -110,6 +133,9 @@ namespace SharpReverseProxy {
 
         private void SetProxyRequestHeaders(HttpRequestMessage requestMessage, HttpContextBase context) {
             foreach (string header in context.Request.Headers) {
+                if (ExcludedRequestHeaders.Contains(header.ToLowerInvariant())) {
+                    continue;
+                }
                 var values = context.Request.Headers.GetValues(header);
                 if (!requestMessage.Headers.TryAddWithoutValidation(header, values)) {
                     requestMessage.Content?.Headers.TryAddWithoutValidation(header, values);
