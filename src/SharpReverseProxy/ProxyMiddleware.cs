@@ -4,7 +4,7 @@ using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Threading.Tasks;
-using System.Web;
+using Microsoft.Owin;
 
 namespace SharpReverseProxy {
     using AppFunc = Func<IDictionary<string, object>, Task>;
@@ -44,7 +44,7 @@ namespace SharpReverseProxy {
         }
 
         public async Task Invoke(IDictionary<string, object> environment) {
-            var context = (HttpContextBase) environment["System.Web.HttpContextBase"];
+            var context = new OwinContext(environment);
             var uri = GeRequestUri(context);
             var resultBuilder = new ProxyResultBuilder(uri);
 
@@ -61,11 +61,11 @@ namespace SharpReverseProxy {
                 return;
             }
 
-            var proxyRequest = new HttpRequestMessage(new HttpMethod(context.Request.HttpMethod), uri);
+            var proxyRequest = new HttpRequestMessage(new HttpMethod(context.Request.Method), uri);
             SetProxyRequestBody(proxyRequest, context);
             SetProxyRequestHeaders(proxyRequest, context);
 
-            matchedRule.Modifier.Invoke(proxyRequest, context.User);
+            matchedRule.Modifier.Invoke(proxyRequest, context.Request.User);
 
             proxyRequest.Headers.Host = !proxyRequest.RequestUri.IsDefaultPort 
                 ? $"{proxyRequest.RequestUri.Host}:{proxyRequest.RequestUri.Port}"
@@ -80,19 +80,22 @@ namespace SharpReverseProxy {
             _options.Reporter.Invoke(resultBuilder.Proxied(proxyRequest.RequestUri, context.Response.StatusCode));
         }
 
-        private async Task ProxyTheRequest(HttpContextBase context, HttpRequestMessage proxyRequest, ProxyRule proxyRule) {
+        private async Task ProxyTheRequest(IOwinContext context, HttpRequestMessage proxyRequest, ProxyRule proxyRule) {
             using (var responseMessage = await _httpClient.SendAsync(proxyRequest,
                                                                      HttpCompletionOption.ResponseHeadersRead)) {
 
                 if(proxyRule.PreProcessResponse || proxyRule.ResponseModifier == null) {
-                    context.Response.ClearHeaders();
+	                foreach (string header in context.Response.Headers.Keys)
+	                {
+		                context.Response.Headers.Remove(header);
+	                }
                     context.Response.StatusCode = (int)responseMessage.StatusCode;
                     foreach (var header in responseMessage.Headers) {
                         if (ExcludedResponseHeaders.Contains(header.Key.ToLowerInvariant())) {
                             continue;
                         }
                         foreach (var value in header.Value.ToArray()) {
-                            context.Response.AddHeader(header.Key, value);
+                            context.Response.Headers.SetValues(header.Key, value);
                         }
                     }
 
@@ -102,10 +105,10 @@ namespace SharpReverseProxy {
                                 continue;
                             }
                             foreach (var value in contentHeader.Value.ToArray()) {
-                                context.Response.AddHeader(contentHeader.Key, value);
+                                context.Response.Headers.SetValues(contentHeader.Key, value);
                             }
                         }
-                        await responseMessage.Content.CopyToAsync(context.Response.OutputStream);
+                        await responseMessage.Content.CopyToAsync(context.Response.Body);
                     }
                 }
 
@@ -115,23 +118,23 @@ namespace SharpReverseProxy {
             }
         }
 
-        private static Uri GeRequestUri(HttpContextBase context) {
-            return context.Request.Url;
+        private static Uri GeRequestUri(IOwinContext context) {
+            return context.Request.Uri;
         }
 
-        private static void SetProxyRequestBody(HttpRequestMessage requestMessage, HttpContextBase context) {
-            var requestMethod = context.Request.HttpMethod;
+        private static void SetProxyRequestBody(HttpRequestMessage requestMessage, IOwinContext context) {
+            var requestMethod = context.Request.Method;
             if (requestMethod == "GET" ||
                 requestMethod == "HEAD" ||
                 requestMethod == "DELETE" ||
                 requestMethod == "TRACE") {
                 return;
             }
-            requestMessage.Content = new StreamContent(context.Request.InputStream);
+            requestMessage.Content = new StreamContent(context.Request.Body);
         }
 
-        private void SetProxyRequestHeaders(HttpRequestMessage requestMessage, HttpContextBase context) {
-            foreach (string header in context.Request.Headers) {
+        private void SetProxyRequestHeaders(HttpRequestMessage requestMessage, IOwinContext context) {
+            foreach (string header in context.Request.Headers.Keys) {
                 if (ExcludedRequestHeaders.Contains(header.ToLowerInvariant())) {
                     continue;
                 }
@@ -142,8 +145,8 @@ namespace SharpReverseProxy {
             }
         }
 
-        private bool UserIsAuthenticated(HttpContextBase context) {
-            return context.User.Identity.IsAuthenticated;
+        private bool UserIsAuthenticated(IOwinContext context) {
+            return context.Request.User.Identity.IsAuthenticated;
         }
     }
 
